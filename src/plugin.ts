@@ -12,10 +12,10 @@ import {
   OMNIROUTE_DEFAULT_MODELS,
   OMNIROUTE_ENDPOINTS,
 } from './constants.js';
-import { fetchModels } from './models.js';
 import { homedir } from 'os';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
+import { fetchModels } from './models.js';
 
 const OMNIROUTE_PROVIDER_NAME = 'OmniRoute';
 const OMNIROUTE_PROVIDER_NPM = '@ai-sdk/openai-compatible';
@@ -40,8 +40,7 @@ export const OmniRouteAuthPlugin: Plugin = async (_input) => {
         const auth = await readAuthFromStore(OMNIROUTE_PROVIDER_ID);
         if (auth?.key) {
           const runtimeConfig = createRuntimeConfig(existingProvider?.options ?? {}, auth.key);
-          const forceRefresh = runtimeConfig.refreshOnList !== false;
-          models = await fetchModels(runtimeConfig, auth.key, forceRefresh);
+          models = await fetchModels(runtimeConfig, auth.key, false);
         }
       } catch (error) {
         console.warn('[OmniRoute] Eager model fetch failed, using defaults:', error);
@@ -143,7 +142,7 @@ async function readAuthFromStore(
   providerId: string,
 ): Promise<{ key?: string; type?: string } | null> {
   try {
-    const dataHome = process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share');
+    const dataHome = process.env.XDG_DATA_HOME || join(process.env.HOME || homedir(), '.local', 'share');
     const authPath = join(dataHome, 'opencode', 'auth.json');
     const content = await readFile(authPath, 'utf-8');
     const data = JSON.parse(content);

@@ -288,48 +288,50 @@ test('gemini schema sanitization applies to responses endpoint request objects',
 
 test('config hook eagerly fetches models when auth is available', async () => {
   const tempHome = join(tmpdir(), `opencode-test-${Date.now()}`);
-  await mkdir(join(tempHome, '.local', 'share', 'opencode'), { recursive: true });
-  await writeFile(
-    join(tempHome, '.local', 'share', 'opencode', 'auth.json'),
-    JSON.stringify({
-      omniroute: { type: 'api', key: 'test-key' },
-    }),
-  );
-  process.env.HOME = tempHome;
+  try {
+    await mkdir(join(tempHome, '.local', 'share', 'opencode'), { recursive: true });
+    await writeFile(
+      join(tempHome, '.local', 'share', 'opencode', 'auth.json'),
+      JSON.stringify({
+        omniroute: { type: 'api', key: 'test-key' },
+      }),
+    );
+    process.env.HOME = tempHome;
 
-  global.fetch = async (input) => {
-    const url = input instanceof Request ? input.url : String(input);
-    if (url.endsWith('/v1/models')) {
-      return new Response(
-        JSON.stringify({
-          object: 'list',
-          data: [{ id: 'custom-model', name: 'Custom Model' }],
-        }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } },
-      );
-    }
-    return new Response(JSON.stringify({ ok: true }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  };
+    global.fetch = async (input) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.endsWith('/v1/models')) {
+        return new Response(
+          JSON.stringify({
+            object: 'list',
+            data: [{ id: 'custom-model', name: 'Custom Model' }],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    };
 
-  const plugin = await OmniRouteAuthPlugin({});
-  const config = {
-    provider: {
-      omniroute: {
-        options: {
-          baseURL: 'http://localhost:20128/v1',
-          apiMode: 'chat',
+    const plugin = await OmniRouteAuthPlugin({});
+    const config = {
+      provider: {
+        omniroute: {
+          options: {
+            baseURL: 'http://localhost:20128/v1',
+            apiMode: 'chat',
+          },
         },
       },
-    },
-  };
+    };
 
-  await plugin.config(config);
+    await plugin.config(config);
 
-  assert.ok(config.provider.omniroute.models['custom-model']);
-  assert.equal(config.provider.omniroute.models['custom-model'].name, 'Custom Model');
-
-  await rm(tempHome, { recursive: true, force: true });
+    assert.ok(config.provider.omniroute.models['custom-model']);
+    assert.equal(config.provider.omniroute.models['custom-model'].name, 'Custom Model');
+  } finally {
+    await rm(tempHome, { recursive: true, force: true });
+  }
 });

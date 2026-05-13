@@ -1,4 +1,7 @@
 import type { Plugin, Hooks } from '@opencode-ai/plugin';
+import { homedir } from 'os';
+import { readFile } from 'fs/promises';
+import { join } from 'path';
 import type {
   OmniRouteApiMode,
   OmniRouteConfig,
@@ -12,9 +15,6 @@ import {
   OMNIROUTE_DEFAULT_MODELS,
   OMNIROUTE_ENDPOINTS,
 } from './constants.js';
-import { homedir } from 'os';
-import { readFile } from 'fs/promises';
-import { join } from 'path';
 import { fetchModels } from './models.js';
 
 const OMNIROUTE_PROVIDER_NAME = 'OmniRoute';
@@ -150,7 +150,11 @@ async function readAuthFromStore(
     const auth = data[providerId];
     if (!isRecord(auth)) return null;
     return auth as { key?: string; type?: string };
-  } catch {
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
+      return null;
+    }
+    console.warn('[OmniRoute] Unexpected error reading auth store:', error);
     return null;
   }
 }

@@ -82,6 +82,8 @@ export interface OmniRouteConfig {
   apiKey: string;
   /** API mode for OpenAI-compatible provider routing */
   apiMode: OmniRouteApiMode;
+  /** Enable verbose OmniRoute logging in the TUI (default: false) */
+  verbose?: boolean;
   /** Default models to use if /v1/models fails */
   defaultModels?: OmniRouteModel[];
   /** Model cache TTL in milliseconds (default: 5 minutes) */

@@ -16,6 +16,7 @@ const CONFIG = {
   apiKey: 'test-key',
   apiMode: 'chat',
   modelCacheTtl: 60000,
+  modelsDev: { enabled: false },
 };
 
 afterEach(() => {

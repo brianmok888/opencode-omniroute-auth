@@ -71,6 +71,7 @@ test('loader injects auth headers only for OmniRoute URLs', async () => {
     options: {
       baseURL: 'http://localhost:20128/v1',
       apiMode: 'chat',
+      modelsDev: { enabled: false },
     },
     models: {},
   };
@@ -123,7 +124,7 @@ test('gemini tool schema payload is sanitized before forwarding', async () => {
   };
 
   const provider = {
-    options: { baseURL: 'http://localhost:20128/v1', apiMode: 'chat' },
+    options: { baseURL: 'http://localhost:20128/v1', apiMode: 'chat', modelsDev: { enabled: false } },
     models: {},
   };
 
@@ -188,7 +189,7 @@ test('non-gemini payload keeps original tool schema fields', async () => {
   };
 
   const provider = {
-    options: { baseURL: 'http://localhost:20128/v1', apiMode: 'chat' },
+    options: { baseURL: 'http://localhost:20128/v1', apiMode: 'chat', modelsDev: { enabled: false } },
     models: {},
   };
 
@@ -333,5 +334,67 @@ test('config hook eagerly fetches models when auth is available', async () => {
     assert.equal(config.provider.omniroute.models['custom-model'].name, 'Custom Model');
   } finally {
     await rm(tempHome, { recursive: true, force: true });
+  }
+});
+
+function createInterceptTestFetch() {
+  return async (input) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url.endsWith('/v1/models')) {
+      return new Response(JSON.stringify(createModelsResponse()), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+}
+
+test('verbose=false suppresses intercept logs', async () => {
+  const plugin = await OmniRouteAuthPlugin({});
+  const provider = {
+    options: { baseURL: 'http://localhost:20128/v1', apiMode: 'chat', modelsDev: { enabled: false } },
+    models: {},
+  };
+  const logs = [];
+  const originalLog = console.log;
+  console.log = (...args) => { logs.push(args.join(' ')); };
+
+  try {
+    global.fetch = createInterceptTestFetch();
+    const options = await plugin.auth.loader(async () => ({ type: 'api', key: 'secret-key' }), provider);
+    await options.fetch('http://localhost:20128/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'gpt-4.1-mini', messages: [] }),
+    });
+    assert.equal(logs.some((l) => l.includes('Intercepting request')), false);
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test('verbose=true emits intercept logs', async () => {
+  const plugin = await OmniRouteAuthPlugin({});
+  const provider = {
+    options: { baseURL: 'http://localhost:20128/v1', apiMode: 'chat', verbose: true, modelsDev: { enabled: false } },
+    models: {},
+  };
+  const logs = [];
+  const originalLog = console.log;
+  console.log = (...args) => { logs.push(args.join(' ')); };
+
+  try {
+    global.fetch = createInterceptTestFetch();
+    const options = await plugin.auth.loader(async () => ({ type: 'api', key: 'secret-key' }), provider);
+    await options.fetch('http://localhost:20128/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'gpt-4.1-mini', messages: [] }),
+    });
+    assert.equal(logs.some((l) => l.includes('Intercepting request')), true);
+  } finally {
+    console.log = originalLog;
   }
 });

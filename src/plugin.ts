@@ -126,11 +126,13 @@ function createRuntimeConfig(
   const refreshOnList = getBoolean(options, 'refreshOnList');
   const modelsDev = getModelsDevConfig(options);
   const modelMetadata = getModelMetadataConfig(options);
+  const verbose = getBoolean(options, 'verbose') ?? false;
 
   return {
     baseUrl,
     apiKey,
     apiMode: getApiMode(options),
+    verbose,
     modelCacheTtl,
     refreshOnList,
     modelsDev,
@@ -440,7 +442,9 @@ function createFetchInterceptor(
       return fetch(input, init);
     }
 
-    console.log(`[OmniRoute] Intercepting request to ${url}`);
+    if (config.verbose || process.env.OMNIROUTE_DEBUG === '1') {
+      console.log(`[OmniRoute] Intercepting request to ${url}`);
+    }
 
     // Merge headers from Request and init to avoid dropping existing headers
     const headers = new Headers(input instanceof Request ? input.headers : undefined);
@@ -454,7 +458,7 @@ function createFetchInterceptor(
     headers.set('Authorization', `Bearer ${config.apiKey}`);
     headers.set('Content-Type', 'application/json');
 
-    const sanitizedBody = await sanitizeGeminiToolSchemas(input, init, url);
+    const sanitizedBody = await sanitizeGeminiToolSchemas(input, init, url, config);
 
     // Clone init to avoid mutating original
     const modifiedInit: RequestInit = {
@@ -466,9 +470,10 @@ function createFetchInterceptor(
     // Make the request
     const response = await fetch(input, modifiedInit);
 
-    // Handle model fetching endpoint specially
     if (url.includes('/v1/models') && response.ok) {
-      console.log('[OmniRoute] Processing /v1/models response');
+      if (config.verbose || process.env.OMNIROUTE_DEBUG === '1') {
+        console.log('[OmniRoute] Processing /v1/models response');
+      }
     }
 
     return response;
@@ -481,6 +486,7 @@ async function sanitizeGeminiToolSchemas(
   input: RequestInfo | URL,
   init: RequestInit | undefined,
   url: string,
+  config: OmniRouteConfig,
 ): Promise<string | undefined> {
   if (!url.includes('/chat/completions') && !url.includes('/responses')) {
     return undefined;
@@ -518,7 +524,9 @@ async function sanitizeGeminiToolSchemas(
     return undefined;
   }
 
-  console.log('[OmniRoute] Sanitized Gemini tool schema keywords');
+  if (config.verbose || process.env.OMNIROUTE_DEBUG === '1') {
+    console.log('[OmniRoute] Sanitized Gemini tool schema keywords');
+  }
   return JSON.stringify(clonedPayload);
 }
 

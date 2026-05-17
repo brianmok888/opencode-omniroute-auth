@@ -4,6 +4,7 @@ import {
   OMNIROUTE_ENDPOINTS,
   MODEL_CACHE_TTL,
   REQUEST_TIMEOUT,
+  PROVIDER_ALIAS_TO_CANONICAL,
 } from './constants.js';
 import {
   getModelsDevIndex,
@@ -46,6 +47,124 @@ function getCacheKey(config: OmniRouteConfig, apiKey: string): string {
     : '';
 
   return `${baseUrl}:${apiKey}:${modelsDevHash}`;
+}
+
+/**
+ * Normalize an OmniRoute model by reading all field variants
+ * with proper precedence: camelCase > snake_case > capabilities
+ */
+function normalizeModel(model: OmniRouteModel): OmniRouteModel {
+  const capabilities =
+    model.capabilities && typeof model.capabilities === 'object'
+      ? model.capabilities
+      : {};
+
+  return {
+    ...model,
+    id: model.id,
+    name: model.name || model.id,
+    description: model.description || `OmniRoute model: ${model.id}`,
+
+    // Context limits: prefer explicit camelCase, fallback to snake_case
+    contextWindow:
+      model.contextWindow ?? model.context_length ?? model.max_input_tokens,
+    maxTokens: model.maxTokens ?? model.max_output_tokens,
+
+    // Capabilities: prefer explicit camelCase, fallback to capabilities object, fallback to snake_case
+    supportsStreaming: model.supportsStreaming,
+    supportsVision:
+      model.supportsVision ??
+      model.vision ??
+      capabilities.vision ??
+      capabilities.attachment,
+    supportsTools:
+      model.supportsTools ??
+      model.tool_calling ??
+      capabilities.tool_calling ??
+      capabilities.toolcall,
+    supportsReasoning:
+      model.supportsReasoning ??
+      model.reasoning ??
+      capabilities.reasoning ??
+      capabilities.thinking,
+    supportsAttachment:
+      model.supportsAttachment ??
+      model.attachment ??
+      capabilities.attachment,
+    supportsTemperature:
+      model.supportsTemperature ??
+      model.temperature ??
+      capabilities.temperature,
+  };
+}
+
+/**
+ * Deduplicate models by canonical provider+model key.
+ * Prefers canonical-prefixed IDs over aliases.
+ *
+ * NOTE: Only deduplicates known aliases (PROVIDER_ALIAS_TO_CANONICAL).
+ * Unknown provider prefixes are kept as-is to preserve user metadata.
+ */
+function deduplicateModels(models: OmniRouteModel[]): OmniRouteModel[] {
+  const seen = new Map<string, OmniRouteModel>();
+
+  for (const model of models) {
+    const parts = model.id.split('/');
+    if (parts.length !== 2) {
+      // Not a provider/model ID, keep as-is
+      seen.set(model.id, model);
+      continue;
+    }
+
+    const [providerPrefix, modelKey] = parts;
+    const canonicalPrefix = PROVIDER_ALIAS_TO_CANONICAL[providerPrefix];
+
+    // Only deduplicate known aliases; preserve unknown prefixes as-is
+    if (!canonicalPrefix) {
+      // Merge metadata if same unknown prefix seen again
+      const existing = seen.get(model.id);
+      seen.set(model.id, existing ? { ...existing, ...model } : model);
+      continue;
+    }
+
+    const canonicalId = `${canonicalPrefix}/${modelKey}`;
+
+    const existing = seen.get(canonicalId);
+    if (!existing) {
+      // First time seeing this model - store with canonical ID
+      seen.set(canonicalId, {
+        ...model,
+        id: canonicalId,
+      });
+    } else {
+      // Merge alias metadata into existing, preferring existing (canonical) fields
+      seen.set(canonicalId, { ...model, ...existing, id: canonicalId });
+    }
+  }
+
+  return [...seen.values()];
+}
+
+/**
+ * Reverse a provider alias to its canonical form for metadata lookups.
+ * Returns the original id if no alias mapping exists.
+ */
+export function resolveProviderAliasForMetadata(modelId: string): string {
+  const parts = modelId.split('/');
+  if (parts.length !== 2) return modelId;
+  
+  const [providerPrefix, modelKey] = parts;
+  const canonicalPrefix = PROVIDER_ALIAS_TO_CANONICAL[providerPrefix];
+  if (!canonicalPrefix) return modelId;
+  
+  return `${canonicalPrefix}/${modelKey}`;
+}
+
+/**
+ * Check if a provider prefix is a known alias.
+ */
+export function isProviderAlias(providerPrefix: string): boolean {
+  return providerPrefix in PROVIDER_ALIAS_TO_CANONICAL;
 }
 
 /**
@@ -109,7 +228,12 @@ export async function fetchModels(
 
     // Runtime validation to ensure API returns expected structure
     if (!rawData || typeof rawData !== 'object' || !Array.isArray(rawData.data)) {
-      warn(`Invalid models response structure: ${JSON.stringify(rawData)}`);
+      const dataType = rawData && typeof rawData === 'object'
+        ? (rawData.data === null
+            ? 'null'
+            : Array.isArray(rawData.data) ? 'array' : typeof rawData.data)
+        : typeof rawData;
+      warn(`Invalid models response structure: expected { data: Array }, got { data: ${dataType} }`);
       throw new Error('Invalid models response structure: expected { data: Array }');
     }
 
@@ -121,25 +245,12 @@ export async function fetchModels(
         (model): model is OmniRouteModel =>
           model !== null && model !== undefined && typeof model.id === 'string',
       )
-      .map((model) => ({
-        ...model,
-        // Ensure required fields
-        id: model.id,
-        name: model.name || model.id,
-        description: model.description || `OmniRoute model: ${model.id}`,
-        // Keep undefined for enrichment to work properly
-        contextWindow: model.contextWindow,
-        maxTokens: model.maxTokens,
-        supportsStreaming: model.supportsStreaming,
-        supportsVision: model.supportsVision,
-        supportsTools: model.supportsTools,
-        supportsTemperature: model.supportsTemperature,
-        supportsReasoning: model.supportsReasoning,
-        supportsAttachment: model.supportsAttachment,
-      }));
+      .map(normalizeModel);
+
+    const dedupedModels = deduplicateModels(rawModels);
 
     // Enrich with models.dev and combo capabilities
-    const models = await enrichModelMetadata(rawModels, config);
+    const models = await enrichModelMetadata(dedupedModels, config);
 
     // Update cache
     modelCache.set(cacheKey, {
@@ -299,11 +410,20 @@ function applyModelsDevMetadata(
 
 function getModelLookupCandidates(modelKey: string): string[] {
   const candidates = new Set<string>();
+
   const addCandidate = (key: string): void => {
-    candidates.add(key.toLowerCase());
-    candidates.add(resolveModelAlias(key).toLowerCase());
-    candidates.add(normalizeModelKey(key));
-    candidates.add(normalizeModelKey(resolveModelAlias(key)));
+    const lower = key.toLowerCase();
+    const normalized = normalizeModelKey(key);
+    const aliasResolved = resolveModelAlias(key);
+
+    candidates.add(lower);
+    candidates.add(normalized);
+
+    // Only add alias variants if they differ from original
+    if (aliasResolved !== key) {
+      candidates.add(aliasResolved.toLowerCase());
+      candidates.add(normalizeModelKey(aliasResolved));
+    }
   };
 
   addCandidate(modelKey);

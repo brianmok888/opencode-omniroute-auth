@@ -10,14 +10,18 @@ import type {
   OmniRouteModelMetadataConfig,
   OmniRouteModelsDevConfig,
   OmniRouteProviderModel,
+  OmniRouteModelVariant,
 } from './types.js';
 import {
   OMNIROUTE_PROVIDER_ID,
   OMNIROUTE_DEFAULT_MODELS,
   OMNIROUTE_ENDPOINTS,
+  DEFAULT_CONTEXT_LIMIT,
+  DEFAULT_OUTPUT_LIMIT,
 } from './constants.js';
-import { fetchModels } from './models.js';
+import { fetchModels, resolveProviderAliasForMetadata, isProviderAlias } from './models.js';
 import { warn, debug } from './logger.js';
+import { sanitizeForLog } from './omniroute-combos.js';
 
 const OMNIROUTE_PROVIDER_NAME = 'OmniRoute';
 const OMNIROUTE_PROVIDER_NPM = '@ai-sdk/openai-compatible';
@@ -53,7 +57,9 @@ export const OmniRouteAuthPlugin: Plugin = async (_input) => {
 
       const generatedModelMetadata: Record<string, OmniRouteModelMetadata> = {};
       for (const model of models) {
-        generatedModelMetadata[model.id] = {
+        // Use canonical ID for metadata keys to match user config
+        const metadataKey = resolveProviderAliasForMetadata(model.id);
+        generatedModelMetadata[metadataKey] = {
           contextWindow: model.contextWindow,
           maxTokens: model.maxTokens,
           supportsTemperature: model.supportsTemperature,
@@ -143,7 +149,7 @@ async function loadProviderOptions(
   try {
     const forceRefresh = config.refreshOnList !== false;
     models = await fetchModels(config, config.apiKey, forceRefresh);
-    debug(`Available models: ${models.map((model) => model.id).join(', ')}`);
+    debug(`Available models: ${models.map((model) => sanitizeForLog(model.id)).join(', ')}`);
   } catch (error) {
     warn(`Failed to fetch models, using defaults: ${error}`);
     models = OMNIROUTE_DEFAULT_MODELS;
@@ -206,13 +212,13 @@ async function readAuthFromStore(
 function resolveProviderApi(api: unknown, apiMode: OmniRouteApiMode): OmniRouteApiMode {
   if (isApiMode(api)) {
     if (api !== apiMode) {
-      warn(`provider.api (${api}) and options.apiMode (${apiMode}) differ; using options.apiMode`);
+      warn(`provider.api (${sanitizeForLog(String(api))}) and options.apiMode (${sanitizeForLog(apiMode)}) differ; using options.apiMode`);
     }
     return apiMode;
   }
 
   if (typeof api === 'string') {
-    warn(`Unsupported provider.api value: ${api}. Using ${apiMode}.`);
+    warn(`Unsupported provider.api value: ${sanitizeForLog(String(api))}. Using ${sanitizeForLog(apiMode)}.`);
   }
 
   return apiMode;
@@ -228,7 +234,7 @@ function getApiMode(options?: Record<string, unknown>): OmniRouteApiMode {
     return value;
   }
 
-  warn(`Unsupported apiMode option: ${String(value)}. Using chat.`);
+    warn(`Unsupported apiMode option: ${sanitizeForLog(String(value))}. Using chat.`);
   return 'chat';
 }
 
@@ -250,13 +256,13 @@ function getBaseUrl(options?: Record<string, unknown>): string {
   try {
     const parsed = new URL(trimmed);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      warn(`Ignoring unsupported baseURL protocol: ${parsed.protocol}`);
+      warn(`Ignoring unsupported baseURL protocol: ${sanitizeForLog(parsed.protocol)}`);
       return OMNIROUTE_ENDPOINTS.BASE_URL;
     }
 
     return trimmed;
   } catch {
-    warn(`Ignoring invalid baseURL: ${trimmed}`);
+    warn(`Ignoring invalid baseURL: ${sanitizeForLog(trimmed)}`);
     return OMNIROUTE_ENDPOINTS.BASE_URL;
   }
 }
@@ -355,12 +361,23 @@ function mergeModelMetadata(
   const userConfig = getModelMetadataConfig({ modelMetadata: rawUserConfig });
 
   if (Array.isArray(userConfig)) {
+    // Validate user-provided metadata blocks to prevent issues in OpenCode framework
+    const validUserConfig = userConfig.filter((block) => {
+      const validation = isValidModelMetadata(block);
+      if (!validation.valid) {
+        warn(`Invalid metadata block for match "${sanitizeForLog(String(block.match))}" (field: ${sanitizeForLog(validation.field ?? '')}), skipping`);
+        return false;
+      }
+      return true;
+    });
+
     const generatedBlocks = Object.entries(generated).map(([id, metadata]) => ({
       match: id,
       ...metadata,
     }));
 
-    return [...generatedBlocks, ...userConfig];
+    // User config comes first so it takes precedence in first-match-wins systems
+    return [...validUserConfig, ...generatedBlocks];
   }
 
   if (userConfig && isRecord(userConfig)) {
@@ -368,11 +385,14 @@ function mergeModelMetadata(
     for (const [id, metadata] of Object.entries(userConfig)) {
       const validation = isValidModelMetadata(metadata);
       if (!validation.valid) {
-        warn(`Invalid metadata for model "${id}" (field: ${validation.field}), skipping`);
+        warn(`Invalid metadata for model "${sanitizeForLog(id)}" (field: ${sanitizeForLog(validation.field ?? '')}), skipping`);
         continue;
       }
-      merged[id] = {
-        ...(generated[id] ?? {}),
+      // If user uses an alias key (e.g., 'cx/gpt-5.5'), merge into canonical key
+      // so it matches the generated metadata and deduplicated model IDs
+      const canonicalId = resolveProviderAliasForMetadata(id);
+      merged[canonicalId] = {
+        ...(merged[canonicalId] ?? {}),
         ...metadata,
       };
     }
@@ -475,6 +495,8 @@ function toProviderModels(
 
 function toProviderModel(model: OmniRouteModel, baseUrl: string): OmniRouteProviderModel {
   const supportsVision = model.supportsVision === true;
+  // Default to true: if API doesn't explicitly say no tools, assume capability exists
+  // This aligns with OpenAI-compatible behavior where most models support tools
   const supportsTools = model.supportsTools !== false;
   const supportsTemperature = model.supportsTemperature !== false;
   const supportsReasoning = model.supportsReasoning === true;
@@ -491,8 +513,8 @@ function toProviderModel(model: OmniRouteModel, baseUrl: string): OmniRouteProvi
     temperature: supportsTemperature,
     tool_call: supportsTools,
     modalities: {
-      input: supportsVision ? ['text', 'image'] as const : ['text'] as const,
-      output: ['text'] as const,
+      input: supportsVision ? ['text', 'image'] : ['text'],
+      output: ['text'],
     },
     api: {
       id: model.id,
@@ -529,8 +551,8 @@ function toProviderModel(model: OmniRouteModel, baseUrl: string): OmniRouteProvi
       },
     },
     limit: {
-      context: model.contextWindow ?? 4096,
-      output: model.maxTokens ?? 4096,
+      context: model.contextWindow ?? DEFAULT_CONTEXT_LIMIT,
+      output: model.maxTokens ?? DEFAULT_OUTPUT_LIMIT,
     },
     options: {},
     headers: {},
@@ -575,7 +597,7 @@ function createFetchInterceptor(
       return fetch(input, init);
     }
 
-    debug(`Intercepting request to ${url}`);
+    debug(`Intercepting request to ${sanitizeForLog(url)}`);
 
     // Merge headers from Request and init to avoid dropping existing headers
     const headers = new Headers(input instanceof Request ? input.headers : undefined);

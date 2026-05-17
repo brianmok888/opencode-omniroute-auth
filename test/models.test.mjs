@@ -144,3 +144,238 @@ test('fetchModels uses different cache for different modelsDev configs', async (
 
   assert.equal(calls, 2, 'Should fetch twice for different modelsDev configs');
 });
+
+// Task 15: Single Model Metadata Tracking
+test('calculateLowestCommonCapabilities produces identical output for single model and combo-with-self', () => {
+  const single = calculateLowestCommonCapabilities([
+    { id: 'test-model', temperature: true, reasoning: true, attachment: true },
+  ]);
+
+  const combo = calculateLowestCommonCapabilities([
+    { id: 'test-model', temperature: true, reasoning: true, attachment: true },
+    { id: 'test-model', temperature: true, reasoning: true, attachment: true },
+  ]);
+
+  // Core capability fields should match (supportsStreaming differs because
+  // single-model path uses modelsDevToMetadata which doesn't add streaming,
+  // while combo path always adds it)
+  assert.equal(single.supportsTemperature, combo.supportsTemperature);
+  assert.equal(single.supportsReasoning, combo.supportsReasoning);
+  assert.equal(single.supportsAttachment, combo.supportsAttachment);
+});
+
+// Task 17: Temperature/Reasoning Combo Tests
+test('calculateLowestCommonCapabilities handles mixed defined and undefined temperature', () => {
+  const capabilities = calculateLowestCommonCapabilities([
+    { id: 'with-temp', temperature: true },
+    { id: 'without-temp' },
+  ]);
+
+  assert.equal(capabilities.supportsTemperature, true);
+});
+
+test('calculateLowestCommonCapabilities handles explicit temperature false overriding true', () => {
+  const capabilities = calculateLowestCommonCapabilities([
+    { id: 'with-temp', temperature: true },
+    { id: 'without-temp', temperature: false },
+  ]);
+
+  assert.equal(capabilities.supportsTemperature, false);
+});
+
+test('calculateLowestCommonCapabilities handles all three capabilities together', () => {
+  const capabilities = calculateLowestCommonCapabilities([
+    { id: 'full-support', temperature: true, reasoning: true, attachment: true },
+    { id: 'partial-support', temperature: true, reasoning: false, attachment: true },
+  ]);
+
+  assert.equal(capabilities.supportsTemperature, true);
+  assert.equal(capabilities.supportsReasoning, false);
+  assert.equal(capabilities.supportsAttachment, true);
+});
+
+test('calculateLowestCommonCapabilities handles single model with undefined temperature', () => {
+  const capabilities = calculateLowestCommonCapabilities([
+    { id: 'no-temp-metadata', reasoning: true },
+  ]);
+
+  assert.equal(capabilities.supportsTemperature, undefined);
+  assert.equal(capabilities.supportsReasoning, true);
+});
+
+// Task 18: Variant+Alias Integration Test
+test('variant suffix stripping works with alias resolution end-to-end', async () => {
+  const { stripVariantSuffix, resolveModelAlias, normalizeModelKey } = await import('../dist/src/models-dev.js');
+
+  // Test variant suffix stripping
+  const { base: base1, stripped: stripped1 } = stripVariantSuffix('gpt-4o-high');
+  assert.equal(base1, 'gpt-4o');
+  assert.equal(stripped1, true);
+
+  const { base: base2, stripped: stripped2 } = stripVariantSuffix('claude-3-sonnet-low');
+  assert.equal(base2, 'claude-3-sonnet');
+  assert.equal(stripped2, true);
+
+  const { base: base3, stripped: stripped3 } = stripVariantSuffix('gpt-4o');
+  assert.equal(base3, 'gpt-4o');
+  assert.equal(stripped3, false);
+
+  // Test alias resolution on base name (variant suffix stripped first)
+  const alias1 = resolveModelAlias('kimi-k2.6-thinking');
+  assert.equal(alias1, 'kimi-k2-thinking');
+
+  const alias2 = resolveModelAlias('kimi-k2.6-thinking-turbo');
+  assert.equal(alias2, 'kimi-k2-thinking-turbo');
+
+  // Test normalization removes preview suffix (variant is stripped separately)
+  const normalized = normalizeModelKey('gpt-4o-preview');
+  assert.equal(normalized, 'gpt-4o');
+});
+
+// Task 19: Subscription Fallback Test
+test('subscription provider fallback enriches from public provider', async () => {
+  const { getSubscriptionFallback } = await import('../dist/src/models-dev.js');
+
+  // Test known subscription fallbacks
+  assert.equal(getSubscriptionFallback('zai-coding-plan'), 'zai');
+  assert.equal(getSubscriptionFallback('kimi-for-coding'), 'moonshotai');
+  assert.equal(getSubscriptionFallback('github-models'), 'google');
+
+  // Test case insensitivity
+  assert.equal(getSubscriptionFallback('ZAI-CODING-PLAN'), 'zai');
+  assert.equal(getSubscriptionFallback('GitHub-Models'), 'google');
+
+  // Test unknown provider returns null
+  assert.equal(getSubscriptionFallback('unknown-provider'), null);
+});
+
+// Task 21: Normalization of snake_case and capabilities fields
+test('normalizeModel reads snake_case fields', async () => {
+  global.fetch = async (input) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    if (url.includes('/v1/models')) {
+      return new Response(
+        JSON.stringify({
+          object: 'list',
+          data: [
+            {
+              id: 'test/model-1',
+              name: 'Test Model',
+              context_length: 128000,
+              max_output_tokens: 4096,
+              capabilities: {
+                vision: true,
+                tool_calling: true,
+                reasoning: true,
+              }
+            }
+          ]
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  };
+
+  const models = await fetchModels(CONFIG, CONFIG.apiKey, false);
+  const model = models.find(m => m.id === 'test/model-1');
+
+  assert.ok(model, 'Model should be found');
+  assert.equal(model.contextWindow, 128000, 'Should read context_length');
+  assert.equal(model.maxTokens, 4096, 'Should read max_output_tokens');
+  assert.equal(model.supportsVision, true, 'Should read capabilities.vision');
+  assert.equal(model.supportsTools, true, 'Should read capabilities.tool_calling');
+  assert.equal(model.supportsReasoning, true, 'Should read capabilities.reasoning');
+});
+
+test('normalizeModel prefers camelCase over snake_case', async () => {
+  global.fetch = async (input) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    if (url.includes('/v1/models')) {
+      return new Response(
+        JSON.stringify({
+          object: 'list',
+          data: [
+            {
+              id: 'test/model-2',
+              contextWindow: 64000,
+              context_length: 32000,
+              capabilities: {
+                vision: false,
+              }
+            }
+          ]
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  };
+
+  const models = await fetchModels(CONFIG, CONFIG.apiKey, false);
+  const model = models.find(m => m.id === 'test/model-2');
+
+  assert.ok(model, 'Model should be found');
+  assert.equal(model.contextWindow, 64000, 'Should prefer camelCase over snake_case');
+});
+
+// Task 22: Deduplication of alias/canonical model entries
+test('deduplication removes alias when canonical exists', async () => {
+  global.fetch = async (input) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    if (url.includes('/v1/models')) {
+      return new Response(
+        JSON.stringify({
+          object: 'list',
+          data: [
+            {
+              id: 'ollamacloud/deepseek-v4',
+              name: 'DeepSeek V4 (alias)',
+              context_length: 64000,
+            },
+            {
+              id: 'ollama-cloud/deepseek-v4',
+              name: 'DeepSeek V4 (canonical)',
+              context_length: 128000,
+            }
+          ]
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  };
+
+  const models = await fetchModels(CONFIG, CONFIG.apiKey, false);
+
+  assert.equal(models.length, 1, 'Should deduplicate to single model');
+  assert.equal(models[0].id, 'ollama-cloud/deepseek-v4', 'Should prefer canonical ID');
+  assert.equal(models[0].contextWindow, 128000, 'Should use canonical metadata');
+});
+
+test('deduplication keeps alias when canonical is missing', async () => {
+  global.fetch = async (input) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    if (url.includes('/v1/models')) {
+      return new Response(
+        JSON.stringify({
+          object: 'list',
+          data: [
+            {
+              id: 'ollamacloud/deepseek-v4',
+              name: 'DeepSeek V4',
+              context_length: 64000,
+            }
+          ]
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  };
+
+  const models = await fetchModels(CONFIG, CONFIG.apiKey, false);
+
+  assert.equal(models.length, 1, 'Should keep single model');
+  assert.equal(models[0].id, 'ollama-cloud/deepseek-v4', 'Should normalize to canonical ID');
+});

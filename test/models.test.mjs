@@ -8,6 +8,7 @@ import {
   isCacheValid,
   refreshModels,
 } from '../dist/runtime.js';
+import { calculateLowestCommonCapabilities } from '../dist/src/models-dev.js';
 
 const ORIGINAL_FETCH = global.fetch;
 
@@ -101,4 +102,45 @@ test('fetchModels falls back to defaults when response shape is invalid', async 
   const models = await fetchModels(CONFIG, CONFIG.apiKey, true);
   assert.ok(models.length > 0);
   assert.ok(typeof models[0].id === 'string');
+});
+
+test('calculateLowestCommonCapabilities ignores missing attachment metadata', () => {
+  const capabilities = calculateLowestCommonCapabilities([
+    { id: 'with-attachment', attachment: true },
+    { id: 'without-attachment' },
+  ]);
+
+  assert.equal(capabilities.supportsAttachment, true);
+});
+
+test('calculateLowestCommonCapabilities respects explicit attachment false', () => {
+  const capabilities = calculateLowestCommonCapabilities([
+    { id: 'with-attachment', attachment: true },
+    { id: 'without-attachment', attachment: false },
+  ]);
+
+  assert.equal(capabilities.supportsAttachment, false);
+});
+
+test('fetchModels uses different cache for different modelsDev configs', async () => {
+  let calls = 0;
+  global.fetch = async (input) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    if (url.includes('/v1/models')) {
+      calls++;
+      return new Response(
+        JSON.stringify({ object: 'list', data: [{ id: `model-${calls}`, name: `Model ${calls}` }] }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  };
+
+  const config1 = { ...CONFIG, modelsDev: { enabled: true, providerAliases: { oai: 'openai' } } };
+  const config2 = { ...CONFIG, modelsDev: { enabled: true, providerAliases: { oai: 'anthropic' } } };
+
+  await fetchModels(config1, CONFIG.apiKey, false);
+  await fetchModels(config2, CONFIG.apiKey, false);
+
+  assert.equal(calls, 2, 'Should fetch twice for different modelsDev configs');
 });

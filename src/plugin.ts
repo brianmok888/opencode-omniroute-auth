@@ -6,6 +6,7 @@ import type {
   OmniRouteApiMode,
   OmniRouteConfig,
   OmniRouteModel,
+  OmniRouteModelMetadata,
   OmniRouteModelMetadataConfig,
   OmniRouteModelsDevConfig,
   OmniRouteProviderModel,
@@ -41,13 +42,34 @@ export const OmniRouteAuthPlugin: Plugin = async (_input) => {
       let models: OmniRouteModel[] = OMNIROUTE_DEFAULT_MODELS;
       try {
         const auth = await readAuthFromStore(OMNIROUTE_PROVIDER_ID);
-        if (auth?.key) {
-          const runtimeConfig = createRuntimeConfig(existingProvider?.options ?? {}, auth.key);
-          models = await fetchModels(runtimeConfig, auth.key, false);
+        const apiKey = auth?.key ?? process.env.OMNIROUTE_API_KEY;
+        if (apiKey) {
+          const runtimeConfig = createRuntimeConfig(existingProvider?.options ?? {}, apiKey);
+          models = await fetchModels(runtimeConfig, apiKey, false);
         }
       } catch (error) {
         warn(`Eager model fetch failed, using defaults: ${error}`);
       }
+
+      const generatedModelMetadata: Record<string, OmniRouteModelMetadata> = {};
+      for (const model of models) {
+        generatedModelMetadata[model.id] = {
+          contextWindow: model.contextWindow,
+          maxTokens: model.maxTokens,
+          supportsTemperature: model.supportsTemperature,
+          supportsReasoning: model.supportsReasoning,
+          supportsAttachment: model.supportsAttachment,
+          supportsVision: model.supportsVision,
+          supportsTools: model.supportsTools,
+          supportsStreaming: model.supportsStreaming,
+          pricing: model.pricing,
+        };
+      }
+
+      const modelMetadata = mergeModelMetadata(
+        existingProvider?.options?.modelMetadata,
+        generatedModelMetadata,
+      );
 
       providers[OMNIROUTE_PROVIDER_ID] = {
         ...existingProvider,
@@ -59,6 +81,7 @@ export const OmniRouteAuthPlugin: Plugin = async (_input) => {
           ...(existingProvider?.options ?? {}),
           baseURL: baseUrl,
           apiMode,
+          modelMetadata,
         },
         models:
           existingProvider?.models && Object.keys(existingProvider.models).length > 0
@@ -325,6 +348,40 @@ function getStringRecord(value: unknown): Record<string, string> | undefined {
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+function mergeModelMetadata(
+  rawUserConfig: unknown,
+  generated: Record<string, OmniRouteModelMetadata>,
+): OmniRouteModelMetadataConfig {
+  const userConfig = getModelMetadataConfig({ modelMetadata: rawUserConfig });
+
+  if (Array.isArray(userConfig)) {
+    const generatedBlocks = Object.entries(generated).map(([id, metadata]) => ({
+      match: id,
+      ...metadata,
+    }));
+
+    return [...generatedBlocks, ...userConfig];
+  }
+
+  if (userConfig && isRecord(userConfig)) {
+    const merged: Record<string, OmniRouteModelMetadata> = { ...generated };
+    for (const [id, metadata] of Object.entries(userConfig)) {
+      const validation = isValidModelMetadata(metadata);
+      if (!validation.valid) {
+        warn(`Invalid metadata for model "${id}" (field: ${validation.field}), skipping`);
+        continue;
+      }
+      merged[id] = {
+        ...(generated[id] ?? {}),
+        ...metadata,
+      };
+    }
+    return merged;
+  }
+
+  return generated;
+}
+
 function isRegExp(value: unknown): value is RegExp {
   return Object.prototype.toString.call(value) === '[object RegExp]';
 }
@@ -363,6 +420,48 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+const BOOLEAN_FIELDS = [
+  'supportsStreaming', 'supportsVision', 'supportsTools',
+  'supportsTemperature', 'supportsReasoning', 'supportsAttachment',
+];
+
+function isValidModelMetadata(value: unknown): { valid: boolean; field?: string } {
+  if (!isRecord(value)) return { valid: false, field: '(not an object)' };
+
+  for (const field of BOOLEAN_FIELDS) {
+    if (field in value && typeof value[field] !== 'boolean') {
+      return { valid: false, field };
+    }
+  }
+
+  if ('contextWindow' in value && typeof value.contextWindow !== 'number') {
+    return { valid: false, field: 'contextWindow' };
+  }
+  if ('maxTokens' in value && typeof value.maxTokens !== 'number') {
+    return { valid: false, field: 'maxTokens' };
+  }
+  if ('name' in value && typeof value.name !== 'string') {
+    return { valid: false, field: 'name' };
+  }
+  if ('description' in value && typeof value.description !== 'string') {
+    return { valid: false, field: 'description' };
+  }
+  if ('pricing' in value) {
+    const pricing = value.pricing;
+    if (!isRecord(pricing)) {
+      return { valid: false, field: 'pricing' };
+    }
+    if ('input' in pricing && typeof pricing.input !== 'number') {
+      return { valid: false, field: 'pricing.input' };
+    }
+    if ('output' in pricing && typeof pricing.output !== 'number') {
+      return { valid: false, field: 'pricing.output' };
+    }
+  }
+
+  return { valid: true };
+}
+
 function toProviderModels(
   models: OmniRouteModel[],
   baseUrl: string,
@@ -377,6 +476,9 @@ function toProviderModels(
 function toProviderModel(model: OmniRouteModel, baseUrl: string): OmniRouteProviderModel {
   const supportsVision = model.supportsVision === true;
   const supportsTools = model.supportsTools !== false;
+  const supportsTemperature = model.supportsTemperature !== false;
+  const supportsReasoning = model.supportsReasoning === true;
+  const supportsAttachment = model.supportsAttachment !== undefined ? model.supportsAttachment : supportsVision;
 
   return {
     id: model.id,
@@ -384,15 +486,23 @@ function toProviderModel(model: OmniRouteModel, baseUrl: string): OmniRouteProvi
     providerID: OMNIROUTE_PROVIDER_ID,
     family: getModelFamily(model.id),
     release_date: '',
+    attachment: supportsAttachment,
+    reasoning: supportsReasoning,
+    temperature: supportsTemperature,
+    tool_call: supportsTools,
+    modalities: {
+      input: supportsVision ? ['text', 'image'] as const : ['text'] as const,
+      output: ['text'] as const,
+    },
     api: {
       id: model.id,
       url: baseUrl,
       npm: OMNIROUTE_PROVIDER_NPM,
     },
     capabilities: {
-      temperature: true,
-      reasoning: false,
-      attachment: supportsVision,
+      temperature: supportsTemperature,
+      reasoning: supportsReasoning,
+      attachment: supportsAttachment,
       toolcall: supportsTools,
       input: {
         text: true,
@@ -425,7 +535,13 @@ function toProviderModel(model: OmniRouteModel, baseUrl: string): OmniRouteProvi
     options: {},
     headers: {},
     status: 'active',
-    variants: {},
+    variants: supportsReasoning
+      ? {
+          low: { reasoningEffort: 'low' },
+          medium: { reasoningEffort: 'medium' },
+          high: { reasoningEffort: 'high' },
+        }
+      : {},
   };
 }
 

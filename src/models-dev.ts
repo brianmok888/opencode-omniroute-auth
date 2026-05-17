@@ -246,6 +246,18 @@ export function modelsDevToMetadata(model: ModelsDevModel): OmniRouteModelMetada
     metadata.maxTokens = model.limit.output;
   }
 
+  if (model.temperature !== undefined) {
+    metadata.supportsTemperature = model.temperature;
+  }
+
+  if (model.reasoning !== undefined) {
+    metadata.supportsReasoning = model.reasoning;
+  }
+
+  if (model.attachment !== undefined) {
+    metadata.supportsAttachment = model.attachment;
+  }
+
   // Derive vision support from modalities
   if (model.modalities?.input?.includes('image')) {
     metadata.supportsVision = true;
@@ -255,8 +267,6 @@ export function modelsDevToMetadata(model: ModelsDevModel): OmniRouteModelMetada
   if (model.tool_call === true) {
     metadata.supportsTools = true;
   }
-
-
 
   // Pricing
   if (model.cost?.input !== undefined || model.cost?.output !== undefined) {
@@ -292,6 +302,12 @@ export function calculateLowestCommonCapabilities(
   let minMaxTokens: number | undefined;
   let allSupportVision = true;
   let allSupportTools = true;
+  let allSupportTemperature = true;
+  let hasTemperatureMetadata = false;
+  let allSupportReasoning = true;
+  let hasReasoningMetadata = false;
+  let allSupportAttachment = true;
+  let hasAttachmentMetadata = false;
   let allSupportStreaming = true;
 
   for (const model of models) {
@@ -314,6 +330,21 @@ export function calculateLowestCommonCapabilities(
     // Tools: all must support it
     const supportsTools = model.tool_call === true;
     allSupportTools = allSupportTools && supportsTools;
+
+    if (model.temperature !== undefined) {
+      hasTemperatureMetadata = true;
+      allSupportTemperature = allSupportTemperature && model.temperature;
+    }
+
+    if (model.reasoning !== undefined) {
+      hasReasoningMetadata = true;
+      allSupportReasoning = allSupportReasoning && model.reasoning;
+    }
+
+    if (model.attachment !== undefined) {
+      hasAttachmentMetadata = true;
+      allSupportAttachment = allSupportAttachment && model.attachment;
+    }
   }
 
   const result: OmniRouteModelMetadata = {};
@@ -334,6 +365,24 @@ export function calculateLowestCommonCapabilities(
     result.supportsTools = true;
   }
 
+  if (hasTemperatureMetadata && allSupportTemperature) {
+    result.supportsTemperature = true;
+  } else if (hasTemperatureMetadata) {
+    result.supportsTemperature = false;
+  }
+
+  if (hasReasoningMetadata && allSupportReasoning) {
+    result.supportsReasoning = true;
+  } else if (hasReasoningMetadata) {
+    result.supportsReasoning = false;
+  }
+
+  if (hasAttachmentMetadata && allSupportAttachment) {
+    result.supportsAttachment = true;
+  } else if (hasAttachmentMetadata) {
+    result.supportsAttachment = false;
+  }
+
   // Streaming is generally supported by all modern models
   if (allSupportStreaming) {
     result.supportsStreaming = true;
@@ -342,6 +391,31 @@ export function calculateLowestCommonCapabilities(
   return result;
 }
 
+
+/**
+ * Subscription → public provider fallback map.
+ * When a subscription provider (e.g. zai-coding-plan) lacks a model,
+ * try its public counterpart (e.g. zai) before giving up.
+ */
+export const SUBSCRIPTION_FALLBACKS: Record<string, string> = {
+  'zai-coding-plan': 'zai',
+  'kimi-for-coding': 'moonshotai',
+  'github-models': 'google',
+};
+
+/**
+ * Known model ID mismatches between OmniRoute and models.dev.
+ * Maps OmniRoute model names to their models.dev equivalents.
+ */
+export const MODEL_ALIASES: Record<string, string> = {
+  'kimi-k2.6-thinking': 'kimi-k2-thinking',
+  'kimi-k2.6-thinking-turbo': 'kimi-k2-thinking-turbo',
+};
+
+export function resolveModelAlias(modelKey: string): string {
+  const lower = modelKey.toLowerCase();
+  return MODEL_ALIASES[lower] ?? MODEL_ALIASES[normalizeModelKey(lower)] ?? modelKey;
+}
 
 /**
  * Resolve provider alias using config and defaults
@@ -372,8 +446,35 @@ export function resolveProviderAlias(
     openrouter: 'openrouter',
     perplexity: 'perplexity',
     cohere: 'cohere',
+    glmt: 'zai-coding-plan',
+    glm: 'zai-coding-plan',
+    'kimi-coding': 'moonshotai',
+    kmc: 'moonshotai',
+    gh: 'google',
+    github: 'google',
     ...config?.modelsDev?.providerAliases,
   };
 
   return aliases[lower] ?? lower;
+}
+
+/**
+ * Get the public fallback provider for a subscription provider.
+ * Returns null if no fallback exists.
+ */
+export function getSubscriptionFallback(provider: string): string | null {
+  return SUBSCRIPTION_FALLBACKS[provider.toLowerCase()] ?? null;
+}
+
+/**
+ * Strip reasoning effort variant suffix from a model name.
+ * Returns the base model name and true if a suffix was stripped.
+ */
+export function stripVariantSuffix(modelKey: string): { base: string; stripped: boolean } {
+  const variantPattern = /-(low|medium|high|xhigh)$/i;
+  const match = modelKey.match(variantPattern);
+  if (match) {
+    return { base: modelKey.slice(0, match.index), stripped: true };
+  }
+  return { base: modelKey, stripped: false };
 }
